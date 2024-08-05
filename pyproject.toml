@@ -23,19 +23,19 @@ core = [
     "absl-py==2.1.0",
     "chex==0.1.86",  # chex 0.1.86 is required for jax 0.4.25.
     "importlab==0.7",  # breaks pytype on 0.8
-    "jax==0.4.28",
-    "jaxlib==0.4.28",
+    "jax==0.4.30",
+    "jaxlib==0.4.30",
     "nltk==3.7",  # for text preprocessing
     "optax==0.1.7",  # optimizers (0.1.0 has known bugs).
     "portpicker",
     "protobuf>=3.20.3",
     "tensorboard-plugin-profile==2.14.0",
     # This has both x86 and arm64 wheels. Underneath the hood it uses tensorflow-macos since 2.13.
-    "tensorflow==2.14.0",
+    "tensorflow==2.16.1",
     "tensorflow-datasets>=4.9.2",
     "tensorflow-io==0.34.0",  # 0.34.0 enabled macOS arm64 builds, but >= 0.35.0 hits 'pure virtual method called' with s3
-    "tensorflow_text==2.14.0; platform_machine == 'x86_64'", # implied by seqio, but also used directly for text processing
-    "tensorstore>=0.1.21",  # used for supporting GDA checkpoints
+    "tensorflow_text==2.16.1; platform_machine == 'x86_64'", # implied by seqio, but also used directly for text processing
+    "tensorstore>=0.1.56",  # used for supporting GDA checkpoints
     "toml",  # for config management
     "typing-extensions==4.9.0",  # needed for typing.Protocol. >4.9.0 runs into attribute error `__non_callable_proto_members__`.
     "scipy==1.12.0",  # to avoid "module 'scipy.linalg' has no attribute 'tril'"
@@ -43,6 +43,7 @@ core = [
     "aqtp==0.4.0", # aqtp>=0.5.0 requires python>=3.10 due to the use of Union shorthand "|" in type hints.
     "flax==0.8.2", # for AQT, param converter and adapter.
     "prefixed==0.7.1", # For formatting file sizes, param counts, etc.
+    "orbax-checkpoint==0.5.14",
 ]
 
 # Apple Silicon dependencies.
@@ -96,8 +97,8 @@ gcp = [
 # For TPU training.
 # Note: Specify -f https://storage.googleapis.com/jax-releases/libtpu_releases.html during install.
 tpu = [
-    "axlearn[gcp]",
-    "jax[tpu]==0.4.28",  # must be >=0.4.19 for compat with v5p.
+    "axlearn[core,gcp]",
+    "jax[tpu]==0.4.30",  # must be >=0.4.19 for compat with v5p.
 ]
 # Vertex AI tensorboard.
 vertexai_tensorboard = [
