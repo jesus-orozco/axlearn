@@ -48,6 +48,9 @@ from axlearn.common.module import (
 from axlearn.common.summary_writer import CheckpointerAction, SummaryWriter
 from axlearn.common.utils import NestedTensor, NestedTensorSpec, Tensor, TensorSpec, set_recursively
 
+from orbax.checkpoint.checkpoint_manager import CheckpointManager, CheckpointManagerOptions
+import orbax.checkpoint as ocp
+
 
 class CheckpointValidationType(str, enum.Enum):
     """Represents a type of checkpoint validation.
@@ -94,10 +97,22 @@ def latest_checkpoint_path(base_dir: str) -> str:
     return sorted(checkpoint_paths(base_dir)).pop()
 
 
+def parse_orbax_latest_checkpoint(base_dir: str):
+    success_ckpt_paths = tf.io.gfile.glob(os.path.join(base_dir, "*", "commit_success.txt"))
+    paths_list = [os.path.dirname(path) for path in success_ckpt_paths]
+    latest_ckpt_path = sorted(paths_list).pop()
+    logging.info(f"Found latest Orbax checkpoint with path: {latest_ckpt_path}")
+    step = latest_ckpt_path.rsplit("/",1)[-1]
+    logging.info(f"Step number: {step}")
+    return step, latest_ckpt_path
+
+
 def check_state_structure(
     ckpt_structure: List[Tuple[str, Any]],
     target_structure: List[Tuple[str, Any]],
     validation: CheckpointValidationType = CheckpointValidationType.EXACT,
+    # A boolean value to indicate the use of Orbax checkpoint
+    use_orbax: bool = True,
 ):
     # Maybe filter structure before comparison.
     def filter_for_validation(structure):
@@ -626,6 +641,7 @@ class Checkpointer(Module):
         storage: StateStorage.Config = TensorStoreStateStorage.default_config()
         # A config that instantiates an optional SummaryWriter, and is used to log checkpoints.
         summary_writer: Optional[SummaryWriter.Config] = None
+        use_orbax: Optional[bool] = True
 
     def __init__(self, cfg: Config, *, parent: Optional[Module]):
         super().__init__(cfg, parent=parent)
@@ -637,6 +653,20 @@ class Checkpointer(Module):
         if cfg.summary_writer is not None:
             cfg.summary_writer.dir = cfg.summary_writer.dir or cfg.dir
             self._add_child("summary_writer", cfg.summary_writer)
+        
+        self._use_orbax = cfg.use_orbax
+        self._checkpoint_manager = None
+        if self._use_orbax:
+            self._checkpoint_manager = CheckpointManager(
+                directory = cfg.dir,
+                options=CheckpointManagerOptions(
+                    create=True,
+                    save_interval_steps=cfg.save_policy.n,
+                    max_to_keep=cfg.keep_last_n,
+                    enable_async_checkpointing=True,
+                )
+            )
+
 
     def __enter__(self):
         if self._within_context:
@@ -655,7 +685,9 @@ class Checkpointer(Module):
         self._within_context = False
 
     def start_gc_thread(self):
-        if self._gc_thread is None and jax.process_index() == 0:
+        #if self._gc_thread is None and jax.process_index() == 0:
+        # Only use gc_thread when not using Orbax Checkpointing. Orbax provides garbage collection ootb.
+        if not self._use_orbax and self._gc_thread is None and jax.process_index() == 0:
             self._gc_stopping = threading.Event()
             self._gc_thread = threading.Thread(
                 name=f"{self.path()}.gc_loop",
@@ -666,13 +698,19 @@ class Checkpointer(Module):
 
     def stop(self):
         """Stops the checkpointer. Waits for async writes and garbage collection loop to finish."""
-        self.wait_until_finished()
-        logging.info("Waiting for gc_thread to finish")
-        if self._gc_thread is not None:
-            self._gc_stopping.set()
-            self._gc_thread.join()
-            self._gc_thread = None
-            logging.info("gc_thread finished")
+        if self._use_orbax:
+            # logging.info("Waiting for Orbax checkpoint to finish writing")
+            self._checkpoint_manager.wait_until_finished()
+            # logging.info("Orbax checkpoints written successfully. Exiting.")
+        else:
+            self.wait_until_finished()
+            logging.info("Waiting for gc_thread to finish")
+            if self._gc_thread is not None:
+                self._gc_stopping.set()
+                self._gc_thread.join()
+                self._gc_thread = None
+                logging.info("gc_thread finished")
+
 
     def _gc_loop(self, *, context_stack: List[InvocationContext]):
         cfg = self.config
@@ -683,6 +721,15 @@ class Checkpointer(Module):
             self.run_garbage_collection()
         logging.info("GC loop done")
 
+    def orbax_dir(self, base_dir: str, step: int):
+        # Return the Orbax checkpoint dir if it exists. Otherwise return None.
+        orbax_step_dir = os.path.join(base_dir, step)
+        logging.info(f"Orbax dir to check: {orbax_step_dir}")
+        if tf.io.gfile.exists(orbax_step_dir):
+            return orbax_step_dir
+        else:
+            return None
+
     def ckpt_dir(self, step: int) -> str:
         cfg = self.config
         return os.path.join(cfg.dir, f"step_{step:08d}")
@@ -691,15 +738,30 @@ class Checkpointer(Module):
         self, *, step: int, state: NestedTensor, evaler_summaries: Optional[Dict[str, Any]] = None
     ):
         """Saves `state` at the given `step` according to the configured checkpoint policy."""
-        if not self._save_policy(step=step, evaler_summaries=(evaler_summaries or {})):
-            return
-        if step < 0 or step >= 10**8:
-            raise ValueError(f"Out-of-range: {step}")
-        ckpt_dir = self.ckpt_dir(step)
-        _cleanup_checkpoint(ckpt_dir)
-        self._storage.save_to_dir(
-            step=step, state=state, ckpt_dir=ckpt_dir, on_commit_callback=write_index_file
-        )
+        # if using Orbax, use Orbax CheckpointManager to save
+        if self._use_orbax:
+            #logging.info("Using Orbax to save checkpoints")
+            result = self._checkpoint_manager.save(
+                step, args=ocp.args.StandardSave(item=state)
+            )
+            # TODO: on successful checkpoint saving, why is result False?
+            # logging.info(f"Result? {result}")
+        else:
+            if not self._save_policy(step=step, evaler_summaries=(evaler_summaries or {})):
+                return
+            if step < 0 or step >= 10**8:
+                raise ValueError(f"Out-of-range: {step}")
+            ckpt_dir = self.ckpt_dir(step)
+            start_time = time.perf_counter()
+            _cleanup_checkpoint(ckpt_dir)
+            self._storage.save_to_dir(
+                step=step, state=state, ckpt_dir=ckpt_dir, on_commit_callback=write_index_file
+            )
+            end_time = time.perf_counter()
+            logging.info(
+                "Saved checkpoint with %s in %s seconds", type(self._storage), end_time - start_time
+            )
+
         if "summary_writer" in self.children:
             self.summary_writer.log_checkpoint(
                 step=step,
@@ -813,18 +875,43 @@ class Checkpointer(Module):
             as restored_checkpoint_state.
         """
         cfg = self.config
+        restored_state = state
         if step is not None:
             # For a specified step, we try to load it.
-            ckpt_dir = self.ckpt_dir(step)
-            restored_state = self._validate_and_restore(step=step, state=state, ckpt_dir=ckpt_dir)
-            if "summary_writer" in self.children:
-                self.summary_writer.log_checkpoint(
-                    step=step,
-                    state=state,
-                    ckpt_dir=ckpt_dir,
-                    action=CheckpointerAction.RESTORE,
-                )
-            return step, restored_state
+            # Check first to see if previous checkpoints are saved with Orbax
+            orbax_ckpt_dir = self.orbax_dir(base_dir=cfg.dir, step=step)
+            logging.info(f"Specified step number. Attempting to restore checkpoints with Orbax dir: {orbax_ckpt_dir}")
+
+            if orbax_ckpt_dir is not None:
+                try:
+                    transformed_state = jax.tree.map(transform_tensorspec, state)
+                    restored_state = self._checkpoint_manager.restore(
+                        step=step,
+                        args=ocp.args.StandardRestore(transformed_state)
+                    )
+                    step = step
+                except Exception as e:
+                    logging.info(f"Encountered the following error when restoring Orbax checkpoint at step {step}: {e}")
+                    step = None
+                    restored_state = state
+                return step, restored_state
+            
+            # If not using Orbax, validate and restore AXLearn checkpoints
+            else:
+                # For a specified step, we try to load it.
+                # return step, self._validate_and_restore(
+                #     step=step, state=state, ckpt_dir=self.ckpt_dir(step)
+                # )
+                ckpt_dir = self.ckpt_dir(step)
+                restored_state = self._validate_and_restore(step=step, state=state, ckpt_dir=ckpt_dir)
+                if "summary_writer" in self.children:
+                    self.summary_writer.log_checkpoint(
+                        step=step,
+                        state=state,
+                        ckpt_dir=ckpt_dir,
+                        action=CheckpointerAction.RESTORE,
+                    )
+                return step, restored_state
         try:
             # Latest checkpoint path, if it exists, is guaranteed to be complete.
             ckpt_dir = latest_checkpoint_path(cfg.dir)
@@ -840,6 +927,34 @@ class Checkpointer(Module):
                 )
         except IndexError:
             # No checkpoint path exists. Return with input state.
-            logging.info("Could not find any completed checkpoints under %s", cfg.dir)
-            restored_state = state
+            #logging.info("Could not find any completed checkpoints under %s", cfg.dir)
+            #restored_state = state
+            # Try to restore Orbax checkpoint
+            logging.info("Did not find legacy checkpoint. Trying to restore Orbax checkpoint now...")
+            try:
+                transformed_state = jax.tree.map(transform_tensorspec, state)
+                restored_state = self._checkpoint_manager.restore(
+                    step=self._checkpoint_manager.latest_step(),
+                    args=ocp.args.StandardRestore(transformed_state)
+                )
+                step = self._checkpoint_manager.latest_step()
+                logging.info("Restored Orbax checkpoints at step %s", step)
+            except Exception as e:
+                logging.info(f"Caught Exception: {e}")
+
         return step, restored_state
+
+def transform_tensorspec(element):
+    # eg: {'weight': TensorSpec(shape=[32, 8], dtype=<class 'jax.numpy.float32'>, mesh_axes=PartitionSpec(None, 'model'))}
+    if isinstance(element, TensorSpec):
+        # change it into orbax compatible format
+        new_element = jax.ShapeDtypeStruct(
+            shape = element.shape,
+            dtype = element.dtype,
+            sharding = element.sharding
+        )
+    else:
+        print("Not TensorSpec")
+    #print(f"Old element: {element}")
+    #print(f"New element: {new_element}")
+    return new_element
