@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ARG TARGET=base
-ARG BASE_IMAGE=python:3.9-slim
+ARG BASE_IMAGE=python:3.10-slim
 
 FROM ${BASE_IMAGE} AS base
 
@@ -31,8 +31,10 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 # Install dependencies.
+COPY previewutilities-0.0.4-py3-none-any.whl previewutilities-0.0.4-py3-none-any.whl
 RUN pip install flit
 RUN pip install --upgrade pip
+RUN pip install previewutilities-0.0.4-py3-none-any.whl
 
 ################################################################################
 # CI container spec.                                                           #
