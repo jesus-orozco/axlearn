@@ -53,7 +53,7 @@ def setup(
         if initialization_timeout is not None:
             init_kwargs["initialization_timeout"] = initialization_timeout
 
-        if jax_backend == "tpu" or jax_backend == "tpu":
+        if jax_backend == "tpu" or jax_backend == "proxy":
             if not (
                 distributed_coordinator is None and num_processes is None and process_id is None
             ):
