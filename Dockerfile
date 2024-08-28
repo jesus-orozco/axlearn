@@ -69,10 +69,13 @@ RUN pip install .[core,gcp,vertexai_tensorboard]
 
 FROM base AS dataflow
 
+RUN apt-get install -y google-perftools
+
 # Beam workers default to creating a new virtual environment on startup. Instead, we want them to
 # pickup the venv setup above. An alternative is to install into the global environment.
 ENV RUN_PYTHON_SDK_IN_DEFAULT_ENVIRONMENT=1
-RUN pip install .[core,gcp,dataflow]
+ENV PIP_FIND_LINKS=https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+RUN pip install .[core,gcp,dataflow,gpu]
 COPY . .
 
 # Dataflow workers can't start properly if the entrypoint is not set
