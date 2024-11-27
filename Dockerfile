@@ -96,6 +96,7 @@ ENV PIP_FIND_LINKS=https://storage.googleapis.com/jax-releases/libtpu_releases.h
 # Jax will fallback to CPU when run on a machine without TPU.
 RUN pip install .[core,tpu,pathways]
 RUN if [ -n "$EXTRAS" ]; then pip install .[$EXTRAS]; fi
+RUN pip install orbax-checkpoint==0.9.1
 RUN pip install -U --pre libtpu-nightly requests \
     -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 COPY . .
