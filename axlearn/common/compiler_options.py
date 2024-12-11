@@ -47,7 +47,7 @@ def default_xla_options(
     if version == "v6e":
         options.update(
             # improved performance for v6e
-            xla_tpu_scoped_vmem_limit_kib="98304",
+            xla_tpu_scoped_vmem_limit_kib=98304,
             # maxtext xla flags
             # xla_enable_async_all_reduce="true",
             # CF_FOR_ALL_GATHER
@@ -64,7 +64,7 @@ def default_xla_options(
             xla_sc_enable_instruction_fusion="false",
             xla_sc_disjoint_spmem="false",
             tpu_use_continuations="true",
-            xla_jf_crs_combiner_threshold_count="10",
+            xla_jf_crs_combiner_threshold_count=10,
             xla_tpu_enable_sparse_core_collective_offload_all_reduce="true",
             # Flag to enable some advanced scheduling features.
             xla_tpu_enable_all_experimental_scheduler_features="true",
@@ -104,7 +104,7 @@ def default_xla_options(
             # of latency side.
             xla_latency_hiding_scheduler_rerun=0,
         )
-        options["2a886c8_chip_config_name"] = "megachip_tccontrol" 
+        options["2a886c8_chip_config_name"] = "megachip_tccontrol"
     if num_slices > 1:
         # Support multiple TPU slices connected over a data center network.
         options.update(
@@ -120,7 +120,8 @@ def default_xla_options(
 
     # Validate options. Will never fail if this function is implemented correctly.
     for k, v in options.items():
-        assert v in [True, False, "true", "false", "ENABLED"], (k, v)
+        if not isinstance(v, int):
+            assert v in [True, False, "true", "false", "ENABLED", "megachip_tccontrol"], (k, v)
 
     return options
 
