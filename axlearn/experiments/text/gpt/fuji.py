@@ -417,6 +417,36 @@ def get_trainer_kwargs(
                     "gpu-(p5.48xlarge|p4de.24xlarge)-(512|1024)",
                     mesh_shape_from_axes(data=-1, fsdp=128),
                 ),
+                # tpu-v6e.
+                (
+                    "tpu-v6e-.*",
+                    ChainConfigModifier.default_config().set(
+                        config_modifiers=[
+                            MeshShapeModifier.default_config().set(
+                                mesh_shape=mesh_shape_from_axes(data=-1, fsdp=256)
+                            ),
+                            RematSpecModifier.default_config().set(
+                                remat_policies={
+                                    "model.decoder.transformer.layer": RematSpec(
+                                        prevent_cse=True,
+                                        policy=config_for_function(
+                                            jax_remat_policies.save_and_offload_only_these_names
+                                        ).set(
+                                            names_which_can_be_saved=[],
+                                            names_which_can_be_offloaded=[
+                                                "FlashAttention.q_proj",
+                                                "FlashAttention.k_proj",
+                                                "FlashAttention.v_proj",
+                                            ],
+                                            offload_src="device",
+                                            offload_dst="pinned_host",
+                                        ),
+                                    ),
+                                }
+                            ),
+                        ],
+                    ),
+                ),
             ),
         )
     else:
