@@ -774,6 +774,8 @@ class TPUGKEJob(GKEJob):
             initContainers=[self._build_uploader_container()],
             serviceAccountName=cfg.service_account,
             volumes=volumes,
+            hostNetwork=True,
+            dnsPolicy="ClusterFirstWithHostNet",
         )
 
         if cfg.priority_class:
