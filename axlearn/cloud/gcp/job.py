@@ -723,11 +723,7 @@ class TPUGKEJob(GKEJob):
                 env=[
                     {
                         "name": "PATHWAYS_HEAD",
-                        "valueFrom": {
-                            "fieldRef": {
-                                "fieldPath": "metadata.labels['jobset.sigs.k8s.io/coordinator']",
-                            }
-                        },
+                        "value": f"{cfg.name}-pathways-head-0-0.{cfg.name}",
                     }
                 ],
                 args=[
@@ -748,11 +744,7 @@ class TPUGKEJob(GKEJob):
                 env=[
                     {
                         "name": "HOST_ADDRESS",
-                        "valueFrom": {
-                            "fieldRef": {
-                                "fieldPath": "metadata.labels['jobset.sigs.k8s.io/coordinator']",
-                            }
-                        },
+                        "value": f"{cfg.name}-pathways-head-0-0.{cfg.name}",
                     },{
                         "name": "TPU_SKIP_MDS_QUERY",
                         "value": "true",
