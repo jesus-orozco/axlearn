@@ -62,6 +62,10 @@ from axlearn.experiments.text.gpt.common import model_config as common_model_con
 from axlearn.experiments.text.gpt.common import scaled_hidden_dim
 from axlearn.experiments.trainer_config_utils import TrainerConfigFn, V6eFlashConfigModifier
 
+from absl import flags
+
+FLAGS = flags.FLAGS
+
 MODEL_SIZES = ("test", "1B", "3B", "7B", "8B", "70B")
 
 
@@ -245,6 +249,10 @@ def get_trainer_kwargs(
     max_sequence_length = MAX_SEQUENCE_LENGTH[version]
     train_batch_size = tokens_per_batch // max_sequence_length
 
+    if FLAGS.pdbs:
+        import jax
+        train_batch_size = len(jax.devices()) * int(FLAGS.pdbs)
+
     # Whether to use grouped query attention.
     num_kv_heads = None
     if version in (Version.V3, Version.V3_TIKTOKEN):
@@ -371,7 +379,10 @@ def get_trainer_kwargs(
             learner_kwargs=dict(peak_lr=3e-4, weight_decay=0.1),
             max_sequence_length=max_sequence_length,
             train_batch_size=train_batch_size,
-            max_step=max_step,
+            eval_batch_size=train_batch_size,
+            max_step=3000,
+            eval_every_n_steps=1500,
+            save_every_n_steps=100,
             mesh_shape=mesh_shape_from_axes(data=-1, fsdp=8),
             mesh_rules=(
                 # Step time:

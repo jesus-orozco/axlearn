@@ -362,6 +362,10 @@ class GKEJob(GCPJob):
             **self._build_jobset(),
         )
         logging.info("Submitting JobSet body=%s api_kwargs=%s", custom_object, api_kwargs)
+        # import yaml
+        # with open(f'jobsets/{cfg.name}.yaml', 'w') as file:
+        #     yaml.dump(custom_object, file, default_flow_style=False, indent=4)
+
         return k8s.client.CustomObjectsApi().create_namespaced_custom_object(
             namespace=cfg.namespace,
             body=custom_object,
@@ -388,6 +392,23 @@ class TPUGKEJob(GKEJob):
                 "alpha.jobset.sigs.k8s.io/exclusive-topology": "cloud.google.com/gke-nodepool",
             }
         )
+        # cfg: TPUReplicatedJob.Config = self.config
+        # if cfg.enable_pathways:
+        #     logging.info("Building pathways jobset.")
+        #     jobset["spec"]["successPolicy"] = dict(operator="All", targetReplicatedJobs=["pathways-head"])
+        #     jobset["spec"]["replicatedJobs"] = [
+        #             dict(
+        #                 name="pathways-head",
+        #                 #replicas=1,
+        #                 #template=self._build_job("pathways-head"),
+        #             ),
+        #             dict(
+        #                 name="pathways-workers",
+        #                 #replicas=self.builder.accelerator.num_replicas,
+        #                 #template=self._build_job("pathways-workers"),
+        #             ),
+        #         ]            
+
         return jobset
 
 

@@ -52,7 +52,7 @@ def setup(
         if initialization_timeout is not None:
             init_kwargs["initialization_timeout"] = initialization_timeout
 
-        if jax_backend == "tpu":
+        if jax_backend in ("tpu", "proxy"):
             if (distributed_coordinator is None) ^ (process_id is None):
                 raise ValueError(
                     "distributed_coordinator and process_id should be both None or both "
@@ -96,5 +96,6 @@ def setup(
                 # local_device_ids arg allows us to maintain expected behavior
                 init_kwargs["local_device_ids"] = list(range(8))
 
-        jax.distributed.initialize(**init_kwargs)
-        _jax_distributed_initialized = True
+        if jax_backend != "proxy":
+            jax.distributed.initialize(**init_kwargs)
+            _jax_distributed_initialized = True

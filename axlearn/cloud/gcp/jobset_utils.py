@@ -301,6 +301,7 @@ class TPUReplicatedJob(BaseReplicatedJob):
         priority_class: Optional[str] = None
         additional_node_networks: Optional[str] = None
         replicated_job_name: str = "job"
+        enable_pathways: bool = False
 
     @classmethod
     def define_flags(cls, fv: flags.FlagValues):
@@ -323,6 +324,12 @@ class TPUReplicatedJob(BaseReplicatedJob):
             "priority_class",
             None,
             "The GKE PriorityClass for the job.",
+            **common_kwargs,
+        )
+        flags.DEFINE_boolean(
+            "enable_pathways",
+            None,
+            "Whether to enable ML Pathways (single-controler JAX) for TPU workloads.",
             **common_kwargs,
         )
 
@@ -364,7 +371,17 @@ class TPUReplicatedJob(BaseReplicatedJob):
                 dict(name=spec.name, mountPath=spec.mount_path, readOnly=spec.read_only)
             )
 
-    def _build_container(self) -> Nested[Any]:
+    def _get_pathways_tpu_type(self, device: str) -> str:
+        pathways_tpu_devices = {
+            "v6e": "tpuv6e",
+            "v5p": "tpuv5",
+            "v5litepod": "tpuv5e",
+            "v4": "tpuv4",
+            "v3": "tpuv3",
+        }
+        return pathways_tpu_devices[device.split("-")[0].lower()]
+    
+    def _build_container(self, job_type: str = None) -> Nested[Any]:
         """Builds a config for a single container.
 
         Returns:
@@ -373,6 +390,15 @@ class TPUReplicatedJob(BaseReplicatedJob):
         cfg: TPUReplicatedJob.Config = self.config
         system = USER_FACING_NAME_TO_SYSTEM_CHARACTERISTICS[self._tpu_type]
         volume_mounts = [self._output_volume_mount]
+        resources = {"limits": {}}
+        args = []
+        image = self._bundler.id(cfg.name)
+        ports = [
+            dict(containerPort=8471),  # Port using which TPU VMs communicate.
+            dict(containerPort=8080),  # Port for MXLA coordinator.
+            dict(containerPort=8431),  # Port to export TPU runtime metrics.
+            dict(containerPort=self._load_balancer.target_port),  # Port for load balancer.
+        ]
 
         if cfg.gcsfuse_mount:
             self._maybe_add_volume_mount(volume_mounts, spec=cfg.gcsfuse_mount)
@@ -388,16 +414,45 @@ class TPUReplicatedJob(BaseReplicatedJob):
         if cfg.enable_tpu_ici_resiliency is not None:
             env_vars["ENABLE_ICI_RESILIENCY"] = str(cfg.enable_tpu_ici_resiliency).lower()
 
-        resources = {"limits": {"google.com/tpu": system.chips_per_vm}}
-        # Set request memory by host machine type.
-        machine_memory_gi = GCE_MACHINE_TYPE_TO_MEMORY_CHARACTERISTICS.get(
-            system.gce_machine_type, None
-        )
-        if machine_memory_gi is not None:
-            request_memory_gi = machine_memory_gi * _MEMORY_REQUEST_PERCENTAGE
-            resources["limits"]["memory"] = f"{machine_memory_gi}Gi"
-            resources["requests"] = {"memory": f"{math.floor(request_memory_gi)}Gi"}
-
+        if not cfg.enable_pathways:
+            resources = {"limits": {"google.com/tpu": system.chips_per_vm}}
+            # Set request memory by host machine type.
+            machine_memory_gi = GCE_MACHINE_TYPE_TO_MEMORY_CHARACTERISTICS.get(
+                system.gce_machine_type, None
+            )
+            if machine_memory_gi is not None:
+                request_memory_gi = machine_memory_gi * _MEMORY_REQUEST_PERCENTAGE
+                resources["limits"]["memory"] = f"{machine_memory_gi}Gi"
+                resources["requests"] = {"memory": f"{math.floor(request_memory_gi)}Gi"}
+        else:
+            staging_location = f"{cfg.output_dir}/pathways-staging"
+            if job_type == "pathways-head":
+                env_vars.update(
+                    JAX_BACKEND_TARGET=f"grpc://{cfg.name}-pathways-head-0-0.{cfg.name}:29000",
+                    XCLOUD_ENVIRONMENT="GCP",
+                    JAX_PLATFORMS="proxy",
+                    ENABLE_PATHWAYS_PERSISTENCE="1",
+                    TPU_SKIP_MDS_QUERY="true",
+                    HOST_ADDRESS=f"{cfg.name}-pathways-head-0-0.{cfg.name}",
+                )
+            elif job_type == "pathways-workers":
+                env_vars.update(
+                    MEGASCALE_COORDINATOR_ADDRESS=f"{cfg.name}-pathways-head-0-0.{cfg.name}",
+                    MEGASCALE_NUM_SLICES=cfg.accelerator.num_replicas,
+                    MEGASCALE_SLICE_ID=0,
+                    PATHWAYS_HEAD=f"{cfg.name}-pathways-head-0-0.{cfg.name}",
+                )
+                args.extend(
+                    [
+                        "--server_port=29001",
+                        "--resource_manager_address=$(PATHWAYS_HEAD):29001",
+                        f"--gcs_scratch_location={staging_location}",
+                    ]
+                )
+                image = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest"
+                ports.append(dict(containerPort=29001))
+                resources = {"limits": {"google.com/tpu": system.chips_per_vm}}
+        
         k8s_env_vars = [dict(name=k, value=str(v)) for k, v in env_vars.items()]
         k8s_env_vars.append(
             {"name": "NODE_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}}
@@ -408,18 +463,14 @@ class TPUReplicatedJob(BaseReplicatedJob):
 
         return dict(
             name=cfg.name,
-            image=self._bundler.id(cfg.name),
+            image=image,
             # https://cloud.google.com/kubernetes-engine/docs/how-to/tpus#tpu-chips-node-pool
             # https://cloud.google.com/kubernetes-engine/docs/how-to/tpu-multislice#run_workload
-            ports=[
-                dict(containerPort=8471),  # Port using which TPU VMs communicate.
-                dict(containerPort=8080),  # Port for MXLA coordinator.
-                dict(containerPort=8431),  # Port to export TPU runtime metrics.
-                dict(containerPort=self._load_balancer.target_port),  # Port for load balancer.
-            ],
+            ports=ports,
             securityContext=dict(privileged=True),
             # TODO(markblee): Improve SIGTERM behavior for command.
-            command=["bash", "-c", cfg.command],
+            command=["bash", "-c", cfg.command] if job_type != "pathways-workers" else None,
+            args=args,
             resources=resources,
             # Env var values should always be strings.
             env=k8s_env_vars,
@@ -461,13 +512,70 @@ class TPUReplicatedJob(BaseReplicatedJob):
             volumeMounts=[output_volume_mount],
         )
 
+    def _build_pathways_containers(self) -> list[dict]:
+        """Builds a config for the pathways containers which orchestrate resource management
+            and pathways proxy communications.
+        Returns:
+            A nested dict corresponding to a k8s Container config.
+        """
+        cfg: TPUReplicatedJob.Config = self.config
+        system = USER_FACING_NAME_TO_SYSTEM_CHARACTERISTICS[self._tpu_type]
+        staging_location = f"{cfg.output_dir}/pathways-staging"
+        tpu_type = self._get_pathways_tpu_type(system.device_type)
+
+        return [
+            dict(
+                name="pathways-proxy",
+                image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest",
+                # https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#pod-sidecar-containers
+                # SideCar container is an init container with restartPolicy as "Always".
+                restartPolicy="Always",
+                env=[
+                    {
+                        "name": "PATHWAYS_HEAD",
+                        "value": f"{cfg.name}-pathways-head-0-0.{cfg.name}",
+                    }
+                ],
+                args=[
+                    "--resource_manager_address=$(PATHWAYS_HEAD):29001",
+                    "--server_port=29000",
+                    f"--gcs_scratch_location={staging_location}",
+                ],
+                ports=[dict(containerPort=29000)],
+            ),
+            dict(
+                name="pathways-rm",
+                image="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest",
+                # https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#pod-sidecar-containers
+                # SideCar container is an init container with restartPolicy as "Always".
+                restartPolicy="Always",
+                env=[
+                    {
+                        "name": "HOST_ADDRESS",
+                        "value": f"{cfg.name}-pathways-head-0-0.{cfg.name}",
+                    },
+                    {
+                        "name": "TPU_SKIP_MDS_QUERY",
+                        "value": "true",
+                    },
+                ],
+                args=[
+                    "--server_port=29001",
+                    "--node_type=resource_manager",
+                    f"--instance_count={cfg.accelerator.num_replicas}",
+                    f"--instance_type={tpu_type}:{system.topology}",
+                    f"--gcs_scratch_location={staging_location}",
+                ],
+            ),
+        ]
+
     def _build_shared_memory_volumes(self, shared_memory: str) -> Nested[Any]:
         return {
             "name": "shared-memory",
             "emptyDir": {"medium": "Memory", "sizeLimit": shared_memory},
         }
 
-    def _build_pod(self) -> Nested[Any]:
+    def _build_pod(self, job_type: str = None) -> Nested[Any]:
         """Builds a config for a single Pod, which is a set of containers.
 
         https://kubernetes.io/docs/concepts/workloads/pods
@@ -478,6 +586,7 @@ class TPUReplicatedJob(BaseReplicatedJob):
         cfg: TPUReplicatedJob.Config = self.config
         system = USER_FACING_NAME_TO_SYSTEM_CHARACTERISTICS[self._tpu_type]
         annotations, labels, selector, volumes, tolerations = {}, {}, {}, [], []
+        initContainers = [self._build_uploader_container()]
 
         volumes.append(dict(name="shared-output", emptyDir={}))
         if cfg.gcsfuse_mount:
@@ -542,16 +651,16 @@ class TPUReplicatedJob(BaseReplicatedJob):
             labels.update({"bastion-tier": "reserved"})
         else:
             logging.info("Found tier=%s in env. Using spot quota", tier)
-            selector.update({"cloud.google.com/gke-spot": "true"})
-            tolerations.append(
-                {
-                    "key": "cloud.google.com/gke-spot",
-                    "operator": "Equal",
-                    "value": "true",
-                    "effect": "NoSchedule",
-                }
-            )
-            labels.update({"bastion-tier": "spot"})
+            # selector.update({"cloud.google.com/gke-spot": "true"}) # breaks v6e 
+            # tolerations.append(
+            #     {
+            #         "key": "cloud.google.com/gke-spot",
+            #         "operator": "Equal",
+            #         "value": "true",
+            #         "effect": "NoSchedule",
+            #     }
+            # )
+            # labels.update({"bastion-tier": "spot"})
 
         if cfg.enable_tpu_ici_resiliency is not None:
             selector.update(
@@ -579,7 +688,7 @@ class TPUReplicatedJob(BaseReplicatedJob):
                     # the original jobset attempts to restart (node pool conflict). This is more
                     # reliable at the moment but doesn't take advantage of node pool sharing. GCP is
                     # working on a fix.
-                    "provisioner-nodepool-id": cfg.name,
+                    # "provisioner-nodepool-id": cfg.name,
                 }
             )
 
@@ -624,6 +733,18 @@ class TPUReplicatedJob(BaseReplicatedJob):
             hostnames=["metadata", "metadata.google.internal"],
         )
 
+        if job_type == "pathways-head":
+            # Target a specific CPU nodepool for Pathways containers
+            selector.update({"node.kubernetes.io/instance-type": "n2-standard-32"})
+            initContainers.extend(self._build_pathways_containers())
+        else:
+            selector.update(
+                {
+                    "cloud.google.com/gke-tpu-accelerator": system.gke_accelerator,
+                    "cloud.google.com/gke-tpu-topology": system.topology,
+                }
+            )
+
         spec = dict(
             # NOTE: Don't set hostNetwork or dnsPolicy for compat with Workload Identity.
             terminationGracePeriodSeconds=60,
@@ -632,13 +753,11 @@ class TPUReplicatedJob(BaseReplicatedJob):
             # https://kubernetes.io/docs/tasks/network/customize-hosts-file-for-pods/#adding-additional-entries-with-hostaliases
             hostAliases=[metadata_host_alias],
             nodeSelector={
-                "cloud.google.com/gke-tpu-accelerator": system.gke_accelerator,
-                "cloud.google.com/gke-tpu-topology": system.topology,
                 **selector,
             },
             tolerations=tolerations,
-            containers=[self._build_container()],
-            initContainers=[self._build_uploader_container()],
+            containers=[self._build_container(job_type)],
+            initContainers=initContainers,
             serviceAccountName=cfg.service_account,
             volumes=volumes,
         )
@@ -667,23 +786,48 @@ class TPUReplicatedJob(BaseReplicatedJob):
         """See `BaseReplicatedJob` docstring for details."""
         cfg: TPUReplicatedJob.Config = self.config
         system = USER_FACING_NAME_TO_SYSTEM_CHARACTERISTICS[self._tpu_type]
+        #metadata = dict(annotations=self._load_balancer.metadata)
+
+        #metadata.annotations.update(
+        #    {"alpha.jobset.sigs.k8s.io/exclusive-topology": "cloud.google.com/gke-nodepool"}
+        #)
+
         job_spec = dict(
-            metadata=dict(annotations=self._load_balancer.metadata),
-            spec=dict(
-                parallelism=system.vms_per_slice,
-                completions=system.vms_per_slice,
-                backoffLimit=0,  # Fail the job if any node fails. Retries happen at JobSet level.
-                template=self._build_pod(),
-            ),
-        )
+                metadata=dict(annotations=self._load_balancer.metadata),
+                spec=dict(
+                    parallelism=system.vms_per_slice,
+                    completions=system.vms_per_slice,
+                    backoffLimit=0,  # Fail the job if any node fails. Retries happen at JobSet level.
+                    template=self._build_pod(job_type="pathways-workers" if cfg.enable_pathways else ""),
+                ),
+            )
+
         # NOTE: the suffix here impacts how long job names can be.
-        return [
+        jobs =  [
             dict(
-                name=cfg.replicated_job_name,
+                name="pathways-workers" if cfg.enable_pathways else cfg.replicated_job_name,
                 replicas=cfg.accelerator.num_replicas,
                 template=job_spec,
             )
         ]
+        if cfg.enable_pathways:
+            jobs.append(
+                dict(
+                    name="pathways-head",
+                    replicas=1,
+                    template=dict(
+                        metadata=dict(annotations=self._load_balancer.metadata),
+                        spec=dict(
+                            parallelism=1,
+                            completions=1,
+                            backoffLimit=0,  # Fail the job if any node fails. Retries happen at JobSet level.
+                            template=self._build_pod("pathways-head"),
+                        ),
+                    )
+                )
+            )
+
+        return jobs
 
 
 # TODO(markblee): Generalize this to support different GPU types without different classes.
