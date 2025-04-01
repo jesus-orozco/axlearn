@@ -540,6 +540,14 @@ class TPUReplicatedJob(BaseReplicatedJob):
                     "--resource_manager_address=$(PATHWAYS_HEAD):29001",
                     "--server_port=29000",
                     f"--gcs_scratch_location={staging_location}",
+                    # XLA Flags to prevent OOM
+                    "--xla_tpu_spmd_rng_bit_generator_unsafe=1",
+                    "--xla_tpu_enable_latency_hiding_scheduler=true",
+                    "--xla_tpu_perform_spmd_cse_prevention=false",
+                    "--xla_tpu_enable_megascale_barrier=true",
+                    "--xla_tpu_enable_data_parallel_all_reduce_opt=true",
+                    "--xla_tpu_data_parallel_opt_different_sized_ops=true",
+                    "--xla_tpu_enable_sunk_dcn_allreduce_done_with_host_reduction=true",
                 ],
                 ports=[dict(containerPort=29000)],
             ),
@@ -760,6 +768,8 @@ class TPUReplicatedJob(BaseReplicatedJob):
             initContainers=initContainers,
             serviceAccountName=cfg.service_account,
             volumes=volumes,
+            hostNetwork=True if cfg.enable_pathways else False,
+            dnsPolicy="ClusterFirstWithHostNet" if cfg.enable_pathways else None,
         )
 
         if cfg.priority_class:
