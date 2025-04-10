@@ -552,6 +552,22 @@ class TPUReplicatedJob(SingleReplicatedJob):
         system = USER_FACING_NAME_TO_SYSTEM_CHARACTERISTICS[self._tpu_type]
         staging_location = f"{cfg.output_dir}/pathways-staging"
         tpu_type = self._get_pathways_tpu_type(system.device_type)
+        libtpu_args = []
+
+        from axlearn.common import compiler_options
+
+        try:
+            libtpu_init_options = compiler_options.default_xla_options(
+                instance_type=cfg.accelerator.instance_type,
+                num_slices=cfg.accelerator.num_replicas,
+                backend="tpu",
+            )
+            for k, v in libtpu_init_options.items():
+                if isinstance(v, bool):
+                    v = "1" if v else "0"
+                libtpu_args.append(f"--{k}={v}")
+        except compiler_options.NotTpuError as e:
+            logging.info("LIBTPU_INIT_FLAGS was not set. Reason: %s", e)
 
         return [
             dict(
@@ -564,20 +580,13 @@ class TPUReplicatedJob(SingleReplicatedJob):
                     {
                         "name": "PATHWAYS_HEAD",
                         "value": f"{cfg.name}-pathways-head-0-0.{cfg.name}",
-                    }
+                    },
                 ],
                 args=[
                     "--resource_manager_address=$(PATHWAYS_HEAD):29001",
                     "--server_port=29000",
                     f"--gcs_scratch_location={staging_location}",
-                    # XLA Flags to prevent OOM
-                    "--xla_tpu_spmd_rng_bit_generator_unsafe=1",
-                    "--xla_tpu_enable_latency_hiding_scheduler=true",
-                    "--xla_tpu_perform_spmd_cse_prevention=false",
-                    "--xla_tpu_enable_megascale_barrier=true",
-                    "--xla_tpu_enable_data_parallel_all_reduce_opt=true",
-                    "--xla_tpu_data_parallel_opt_different_sized_ops=true",
-                    "--xla_tpu_enable_sunk_dcn_allreduce_done_with_host_reduction=true",
+                    *libtpu_args,
                 ],
                 ports=[dict(containerPort=29000)],
             ),
