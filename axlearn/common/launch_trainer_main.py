@@ -7,9 +7,11 @@ from absl import app, flags
 from axlearn.common import launch, launch_trainer, measurement
 from axlearn.common.config import config_for_function
 
-import pathwaysutils
 
 def main(_):
+    if flags.FLAGS.jax_backend == "proxy":
+        import pathwaysutils
+        pathwaysutils.initialize()
     measurement.initialize(flags.FLAGS)
     launch.setup()
     trainer_config = launch_trainer.get_trainer_config()
