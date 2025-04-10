@@ -11,6 +11,7 @@ from axlearn.common.config import config_for_function
 def main(_):
     if flags.FLAGS.jax_backend == "proxy":
         import pathwaysutils
+
         pathwaysutils.initialize()
     measurement.initialize(flags.FLAGS)
     launch.setup()

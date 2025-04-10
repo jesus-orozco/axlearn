@@ -15,6 +15,7 @@ import functools
 import itertools
 from typing import Any, List, NamedTuple, Optional, Union
 
+from absl import flags
 from jax.ad_checkpoint import checkpoint_policies as jax_remat_policies
 
 from axlearn.common import causal_lm, config
@@ -61,8 +62,6 @@ from axlearn.experiments.text.gpt.common import (
 from axlearn.experiments.text.gpt.common import model_config as common_model_config
 from axlearn.experiments.text.gpt.common import scaled_hidden_dim
 from axlearn.experiments.trainer_config_utils import TrainerConfigFn, V6eFlashConfigModifier
-
-from absl import flags
 
 FLAGS = flags.FLAGS
 
@@ -251,6 +250,7 @@ def get_trainer_kwargs(
 
     if FLAGS.pdbs:
         import jax
+
         train_batch_size = len(jax.devices()) * int(FLAGS.pdbs)
 
     # Whether to use grouped query attention.

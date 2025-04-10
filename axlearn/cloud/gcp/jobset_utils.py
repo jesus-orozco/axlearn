@@ -380,7 +380,7 @@ class TPUReplicatedJob(BaseReplicatedJob):
             "v3": "tpuv3",
         }
         return pathways_tpu_devices[device.split("-")[0].lower()]
-    
+
     def _build_container(self, job_type: str = None) -> Nested[Any]:
         """Builds a config for a single container.
 
@@ -452,7 +452,7 @@ class TPUReplicatedJob(BaseReplicatedJob):
                 image = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest"
                 ports.append(dict(containerPort=29001))
                 resources = {"limits": {"google.com/tpu": system.chips_per_vm}}
-        
+
         k8s_env_vars = [dict(name=k, value=str(v)) for k, v in env_vars.items()]
         k8s_env_vars.append(
             {"name": "NODE_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}}
@@ -659,7 +659,7 @@ class TPUReplicatedJob(BaseReplicatedJob):
             labels.update({"bastion-tier": "reserved"})
         else:
             logging.info("Found tier=%s in env. Using spot quota", tier)
-            # selector.update({"cloud.google.com/gke-spot": "true"}) # breaks v6e 
+            # selector.update({"cloud.google.com/gke-spot": "true"}) # breaks v6e
             # tolerations.append(
             #     {
             #         "key": "cloud.google.com/gke-spot",
@@ -796,24 +796,26 @@ class TPUReplicatedJob(BaseReplicatedJob):
         """See `BaseReplicatedJob` docstring for details."""
         cfg: TPUReplicatedJob.Config = self.config
         system = USER_FACING_NAME_TO_SYSTEM_CHARACTERISTICS[self._tpu_type]
-        #metadata = dict(annotations=self._load_balancer.metadata)
+        # metadata = dict(annotations=self._load_balancer.metadata)
 
-        #metadata.annotations.update(
+        # metadata.annotations.update(
         #    {"alpha.jobset.sigs.k8s.io/exclusive-topology": "cloud.google.com/gke-nodepool"}
-        #)
+        # )
 
         job_spec = dict(
-                metadata=dict(annotations=self._load_balancer.metadata),
-                spec=dict(
-                    parallelism=system.vms_per_slice,
-                    completions=system.vms_per_slice,
-                    backoffLimit=0,  # Fail the job if any node fails. Retries happen at JobSet level.
-                    template=self._build_pod(job_type="pathways-workers" if cfg.enable_pathways else ""),
+            metadata=dict(annotations=self._load_balancer.metadata),
+            spec=dict(
+                parallelism=system.vms_per_slice,
+                completions=system.vms_per_slice,
+                backoffLimit=0,  # Fail the job if any node fails. Retries happen at JobSet level.
+                template=self._build_pod(
+                    job_type="pathways-workers" if cfg.enable_pathways else ""
                 ),
-            )
+            ),
+        )
 
         # NOTE: the suffix here impacts how long job names can be.
-        jobs =  [
+        jobs = [
             dict(
                 name="pathways-workers" if cfg.enable_pathways else cfg.replicated_job_name,
                 replicas=cfg.accelerator.num_replicas,
@@ -833,7 +835,7 @@ class TPUReplicatedJob(BaseReplicatedJob):
                             backoffLimit=0,  # Fail the job if any node fails. Retries happen at JobSet level.
                             template=self._build_pod("pathways-head"),
                         ),
-                    )
+                    ),
                 )
             )
 

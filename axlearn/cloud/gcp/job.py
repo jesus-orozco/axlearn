@@ -362,10 +362,6 @@ class GKEJob(GCPJob):
             **self._build_jobset(),
         )
         logging.info("Submitting JobSet body=%s api_kwargs=%s", custom_object, api_kwargs)
-        # import yaml
-        # with open(f'jobsets/{cfg.name}.yaml', 'w') as file:
-        #     yaml.dump(custom_object, file, default_flow_style=False, indent=4)
-
         return k8s.client.CustomObjectsApi().create_namespaced_custom_object(
             namespace=cfg.namespace,
             body=custom_object,
@@ -407,7 +403,7 @@ class TPUGKEJob(GKEJob):
         #                 #replicas=self.builder.accelerator.num_replicas,
         #                 #template=self._build_job("pathways-workers"),
         #             ),
-        #         ]            
+        #         ]
 
         return jobset
 
