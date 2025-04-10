@@ -32,6 +32,7 @@ from axlearn.common import (
 )
 from axlearn.common.attention import (
     AttentionLogitBiasLayer,
+    BaseKVCache,
     BaseQKVLinear,
     MultiheadAttention,
     RepeatedTransformerLayer,
@@ -220,6 +221,7 @@ def model_config(
     layer_cfg: TransformerLayer.Config = TransformerLayer.default_config(),
     attention_cfg: Optional[MultiheadAttention.Config] = None,
     attention_qkv_linear: Optional[BaseQKVLinear.Config] = None,
+    attention_kv_cache: Optional[BaseKVCache.Config] = None,
     attention_mask: Optional[AttentionLogitBiasLayer.Config] = None,
     z_loss_scale: float = 0.0,
     ffn_structure: str = "prenorm",
@@ -247,13 +249,14 @@ def model_config(
         layer_cfg: The transformer layer config.
         attention_cfg: The attention config.
         attention_qkv_linear: The attention QKV linear layer.
+        attention_kv_cache: The attention KV Cache layer.
         attention_mask: The AttentionLogitBiasLayer config.
         z_loss_scale: The scalar weight for the z-loss to encourages the cross-entropy loss
             normalizer to be well-behaved.
         ffn_structure: The inner structure of the feedforward layer.
-            Options: [prenorm, postnorm, hybridnorm].
+            Options: See `SupportedNormStructure`.
         atten_structure: The inner structure of the attention layer.
-            Options: [prenorm, postnorm, hybridnorm].
+            Options: See `SupportedNormStructure`.
         atten_logit_cap: Cap the absolute values of logits by tanh.
             Enabled by setting a positive value.
         remat_offload_dst: Destination of remat checkptoing offloading.
@@ -274,6 +277,8 @@ def model_config(
     layer_cfg.self_attention.attention.num_heads = num_heads
     if attention_qkv_linear is not None:
         layer_cfg.self_attention.attention.input_linear = attention_qkv_linear
+    if attention_kv_cache is not None:
+        layer_cfg.self_attention.attention.kv_cache = attention_kv_cache
     layer_cfg.self_attention.structure = atten_structure
     layer_cfg.self_attention.attention.atten_logit_cap = atten_logit_cap
     if issubclass(stack_cfg.klass, (RepeatedTransformerLayer, StackedTransformerLayer)):

@@ -8,6 +8,7 @@ import enum
 import sys
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
+from functools import partial
 from typing import Any, NamedTuple, Optional, Union
 from unittest import mock
 
@@ -27,6 +28,9 @@ from jax.sharding import PartitionSpec
 from axlearn.common import learner, optimizers, serialization, struct, utils
 from axlearn.common.base_layer import BaseLayer, FactorizationSpec, ParameterSpec
 from axlearn.common.config import (
+    REQUIRED,
+    ConfigBase,
+    Required,
     config_class,
     config_for_function,
     maybe_instantiate,
@@ -79,6 +83,8 @@ from axlearn.common.utils import (
     infer_mesh_shape,
     input_partition_spec,
     match_regex_rules,
+    non_empty_leaf_merge_fn,
+    own_fields,
     per_param_dtype_by_path,
     prune_empty,
     prune_tree,
@@ -89,6 +95,7 @@ from axlearn.common.utils import (
     set_data_dir,
     set_recursively,
     split_prng_key,
+    tree_merge,
     tree_paths,
     validate_contains_paths,
     validate_float_dtype,
@@ -867,6 +874,65 @@ class TreeUtilsTest(TestCase):
         with self.assertRaisesRegex(ValueError, "^Argument key has leaf with non-JAX type"):
             check_jax_type(pretty_named_args={"key": "1"})
 
+    def test_prune_tree(self):
+        in_tree = {
+            "a": {
+                "b": {"d": "test"},
+                "c": {
+                    "b": None,
+                    "e": VDict({"ee": 123}),
+                },
+            },
+            "f": 345,
+        }
+        # Prune by path.
+        result = prune_tree(in_tree, lambda k, _: "b" in k)
+        self.assertEqual({"a": {"c": {"e": VDict({"ee": 123})}}, "f": 345}, result)
+        # VDict should be preserved.
+        self.assertIsInstance(result["a"]["c"]["e"], VDict)
+        # Prune by path with prefix/separator.
+        self.assertEqual(
+            {"a": {"c": {"b": None, "e": {"ee": 123}}}, "f": 345},
+            prune_tree(in_tree, lambda k, _: k == "prefix:a:b", prefix="prefix", separator=":"),
+        )
+        # Prune by value.
+        self.assertEqual(
+            {"a": {"b": {"d": "test"}, "c": {"b": None, "e": VDict()}}},
+            prune_tree(in_tree, lambda _, v: isinstance(v, int)),
+        )
+
+    def test_tree_merge(self):
+        default_merge = partial(tree_merge, leaf_merge_fn=non_empty_leaf_merge_fn)
+        primary = {"a": {"b": {}, "c": VDict({"e": 123}), "g": {"e": 123}}, "empty": ()}
+        out = default_merge(primary, secondary={"a": {"b": {"c": 1}}})
+        self.assertEqual(
+            out, {"a": {"b": {"c": 1}, "c": VDict({"e": 123}), "g": {"e": 123}}, "empty": ()}
+        )
+        # Test preserving VDict.
+        self.assertIsInstance(out["a"]["c"], VDict)
+
+        with self.assertRaises(ValueError):
+            default_merge(primary, secondary={"a": {"b": 1}})
+        with self.assertRaises(ValueError):
+            default_merge(primary, secondary={"a": {"c": {"e": 456}}})
+
+        with self.assertRaises(ValueError):
+            # c is not a VDict.
+            tree_merge(primary, secondary={"a": {"c": {"e": 456}}}, leaf_merge_fn=lambda f, s: s)
+        out = tree_merge(
+            primary, secondary={"a": {"c": VDict({"e": 456})}}, leaf_merge_fn=lambda f, s: s
+        )
+        self.assertEqual(
+            out, {"a": {"b": {}, "c": VDict({"e": 456}), "g": {"e": 123}}, "empty": ()}
+        )
+
+        # Non-empty leaves overrides empty leaves.
+        out = default_merge(primary, secondary={"empty": 1})
+        self.assertEqual(out, {"a": {"b": {}, "c": VDict({"e": 123}), "g": {"e": 123}}, "empty": 1})
+
+        out = default_merge(primary, secondary={"a": {"g": {"e": None}}})
+        self.assertEqual(out, primary)
+
     @parameterized.parameters(
         dict(lengths=[3, 4], dtype=None, expected=[[1, 1, 1, 0, 0], [1, 1, 1, 1, 0]]),
         dict(lengths=[3, 4], dtype=jnp.int32, expected=[[1, 1, 1, 0, 0], [1, 1, 1, 1, 0]]),
@@ -1448,36 +1514,6 @@ class MatchRegexRulesTest(TestCase):
         self.assertEqual("w", match_regex_rules("not_special/weight", rules=rules))
         # Custom default value.
         self.assertEqual("d", match_regex_rules("layer/scale", rules=rules, default_value="d"))
-
-
-class PruneTreeTest(TestCase):
-    """Tests prune_tree."""
-
-    def test(self):
-        in_tree = {
-            "a": {
-                "b": {"d": "test"},
-                "c": {
-                    "b": None,
-                    "e": 123,
-                },
-            },
-            "f": 345,
-        }
-        # Prune by path.
-        self.assertEqual(
-            {"a": {"c": {"e": 123}}, "f": 345}, prune_tree(in_tree, lambda k, _: "b" in k)
-        )
-        # Prune by path with prefix/separator.
-        self.assertEqual(
-            {"a": {"c": {"b": None, "e": 123}}, "f": 345},
-            prune_tree(in_tree, lambda k, _: k == "prefix:a:b", prefix="prefix", separator=":"),
-        )
-        # Prune by value.
-        self.assertEqual(
-            {"a": {"b": {"d": "test"}, "c": {"b": None}}},
-            prune_tree(in_tree, lambda _, v: isinstance(v, int)),
-        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2075,6 +2111,22 @@ class TestRematPolicy(TestCase):
         )
         # We have one more recompute of f for remat during backward.
         self.assertEqual(str(remat_backward).count(" dot_general"), 5)
+
+
+class TestOwnFields(TestCase):
+    """Tests the own_fields method."""
+
+    def test_own_fields(self):
+        @config_class
+        class ConfigParent(ConfigBase):
+            parent_field: Required[int] = REQUIRED
+
+        @config_class
+        class ConfigChild(ConfigParent):
+            child_field1: Required[int] = REQUIRED
+            child_field2: Required[int] = REQUIRED
+
+        self.assertSameElements(("child_field1", "child_field2"), own_fields(ConfigChild()))
 
 
 if __name__ == "__main__":

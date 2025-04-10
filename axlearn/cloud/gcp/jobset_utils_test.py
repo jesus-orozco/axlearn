@@ -30,7 +30,6 @@ from axlearn.cloud.gcp.jobset_utils import (
     _MEMORY_REQUEST_PERCENTAGE,
     _METADATA_GOOGLE_INTERNAL_IP,
     BASTION_JOB_VERSION_LABEL,
-    AcceleratorConfig,
     GCSFuseMount,
     HostMount,
     _LoadBalancer,
@@ -41,6 +40,7 @@ from axlearn.cloud.gcp.system_characteristics import (
     USER_FACING_NAME_TO_SYSTEM_CHARACTERISTICS,
 )
 from axlearn.cloud.gcp.test_utils import mock_gcp_settings
+from axlearn.cloud.gcp.tpu import get_default_env
 from axlearn.common.compiler_options import infer_tpu_type
 from axlearn.common.test_utils import TestCase
 
@@ -63,62 +63,68 @@ def _create_serialized_job_spec(job_priority: int, user_id: str):
     return serialized_jobspec.getvalue()
 
 
-def mock_settings():
-    return {
-        "project": "settings-project",
-        "zone": "settings-zone",
-        "ttl_bucket": "settings-ttl-bucket",
-        "gke_cluster": "settings-cluster",
-        "gke_reservation": "settings-reservation",
-        "k8s_service_account": "settings-account",
-        "docker_repo": "settings-repo",
-        "default_dockerfile": "settings-dockerfile",
-        "location_hint": "settings-location-hint",
-    }
-
-
 class TPUReplicatedJobTest(TestCase):
     """Tests TPUReplicatedJob."""
 
     @contextlib.contextmanager
-    def _job_config(
-        self,
-        bundler_cls: type[Bundler],
-        reservation: Optional[str] = None,
-        enable_pre_provisioner: Optional[bool] = None,
-        host_mount_spec: Optional[list[str]] = None,
-        priority_class: Optional[str] = None,
-        gcsfuse_mount_spec: Optional[str] = None,
-    ):
-        with mock_gcp_settings([jobset_utils.__name__, bundler.__name__], mock_settings()):
+    def _job_config(self, bundler_cls: type[Bundler], **kwargs):
+        with mock_gcp_settings([jobset_utils.__name__, bundler.__name__]):
             fv = flags.FlagValues()
             jobset_utils.TPUReplicatedJob.define_flags(fv)
-            if reservation:
-                fv.set_default("reservation", reservation)
-            if host_mount_spec:
-                fv.set_default("host_mount_spec", host_mount_spec)
-            if gcsfuse_mount_spec:
-                fv.set_default("gcsfuse_mount_spec", gcsfuse_mount_spec)
+            fv.set_default("name", "test-name")
+            fv.set_default("instance_type", "tpu-v4-8")
+            for key, value in kwargs.items():
+                if value is not None:
+                    setattr(fv, key, value)
             fv.mark_as_parsed()
             cfg = jobset_utils.TPUReplicatedJob.from_flags(fv)
-            cfg.accelerator = AcceleratorConfig().set(instance_type="tpu-v4-8")
             cfg.project = jobset_utils.gcp_settings("project", required=True, fv=fv)
-            cfg.service_account = jobset_utils.gcp_settings(
-                "k8s_service_account", required=True, fv=fv
-            )
-            cfg.enable_pre_provisioner = enable_pre_provisioner
-            cfg.priority_class = priority_class
             bundler_cfg = bundler_cls.from_spec([], fv=fv).set(image="test-image")
             yield cfg, bundler_cfg
 
+    def test_env_override(self):
+        # Tests that env flags can override defaults.
+        with self._job_config(
+            env=["key1:value1", "TPU_TYPE:dummy"], bundler_cls=ArtifactRegistryBundler
+        ) as (cfg, _):
+            env = get_default_env(tpu_type="test", num_tpu_slices=1, job_name=cfg.name)
+            self.assertIn("TPU_TYPE", env)
+            self.assertNotIn("key1", env)
+            self.assertEqual(env["TPU_TYPE"], "test")
+
+            # Test that the env is updated accordingly.
+            for k, v in env.items():
+                if k == "TPU_TYPE":
+                    self.assertEqual(cfg.env_vars[k], "dummy")  # Should reflect updated value.
+                else:
+                    self.assertEqual(cfg.env_vars[k], v)  # Should reflect original value.
+            # The newly added env should be present.
+            self.assertIn("key1", cfg.env_vars)
+            self.assertEqual(cfg.env_vars["key1"], "value1")
+
+    def test_validate_jobset_name(self):
+        with (
+            self.assertRaisesRegex(ValueError, "invalid"),
+            self._job_config(bundler_cls=ArtifactRegistryBundler) as (cfg, _),
+        ):
+            cfg.set(name="invalid_underscore_name", command="", output_dir="")
+            cfg.instantiate(bundler=mock.Mock())
+
     @parameterized.product(
         [
-            dict(env={}, reservation=None, reservation_project=None, expect_reserved=False),
+            dict(
+                env={},
+                reservation=None,
+                reservation_project=None,
+                expect_reserved=False,
+                expect_spot_selector=True,
+            ),
             dict(
                 env={"BASTION_TIER": "0"},
                 reservation=None,
                 reservation_project=None,
                 expect_reserved=False,
+                expect_spot_selector=True,
             ),
             dict(
                 env={
@@ -129,6 +135,7 @@ class TPUReplicatedJobTest(TestCase):
                 reservation="test-reservation",
                 reservation_project=None,
                 expect_reserved=True,
+                expect_spot_selector=False,
             ),
             dict(
                 env={
@@ -139,18 +146,28 @@ class TPUReplicatedJobTest(TestCase):
                 reservation="test-reservation",
                 reservation_project="test-reservation-project",
                 expect_reserved=True,
+                expect_spot_selector=False,
             ),
             dict(
                 env={"BASTION_TIER": "1", BASTION_JOB_VERSION_ENV_VAR: "2"},
                 reservation="test-reservation",
                 reservation_project=None,
                 expect_reserved=False,
+                expect_spot_selector=True,
             ),
             dict(
                 env={_BASTION_SERIALIZED_JOBSPEC_ENV_VAR: _create_serialized_job_spec(5, "user-2")},
                 reservation="test-reservation",
                 reservation_project=None,
                 expect_reserved=False,
+                expect_spot_selector=True,
+            ),
+            dict(
+                env={"BASTION_TIER": "disabled"},
+                reservation=None,
+                reservation_project=None,
+                expect_reserved=False,
+                expect_spot_selector=False,
             ),
         ],
         bundler_cls=[ArtifactRegistryBundler, CloudBuildBundler],
@@ -174,6 +191,7 @@ class TPUReplicatedJobTest(TestCase):
         self,
         bundler_cls: type[Bundler],
         expect_reserved: bool,
+        expect_spot_selector: bool,
         enable_ici_resiliency: bool,
         env: dict,
         reservation: Optional[str] = None,
@@ -240,15 +258,20 @@ class TPUReplicatedJobTest(TestCase):
                 self.assertEqual([], pod_spec.get("tolerations", []))
                 self.assertEqual("reserved", labels.get("bastion-tier", None))
             else:
-                self.assertEqual("true", node_selector.get("cloud.google.com/gke-spot", None))
+                if expect_spot_selector:
+                    self.assertEqual("true", node_selector.get("cloud.google.com/gke-spot", None))
+                    self.assertEqual("spot", labels.get("bastion-tier", None))
+                    tolerations = {
+                        kv["key"]: (kv["value"], kv["effect"])
+                        for kv in pod_spec.get("tolerations", [])
+                    }
+                    self.assertEqual(
+                        ("true", "NoSchedule"), tolerations.get("cloud.google.com/gke-spot", None)
+                    )
+                else:
+                    self.assertNotIn("cloud.google.com/gke-spot", node_selector)
+                    self.assertNotIn("provisioner-nodepool-id", node_selector)
                 self.assertNotIn("cloud.google.com/reservation-name", node_selector)
-                tolerations = {
-                    kv["key"]: (kv["value"], kv["effect"]) for kv in pod_spec.get("tolerations", [])
-                }
-                self.assertEqual(
-                    ("true", "NoSchedule"), tolerations.get("cloud.google.com/gke-spot", None)
-                )
-                self.assertEqual("spot", labels.get("bastion-tier", None))
 
             self.assertEqual(len(pod_spec["containers"]), 1)
 
@@ -490,19 +513,14 @@ class A3ReplicatedJobTest(TestCase):
         num_replicas: int,
         env_vars: Optional[dict] = None,
     ):
-        with mock_gcp_settings([jobset_utils.__name__, bundler.__name__], mock_settings()):
+        with mock_gcp_settings([jobset_utils.__name__, bundler.__name__]):
             fv = flags.FlagValues()
             jobset_utils.A3ReplicatedJob.define_flags(fv)
+            fv.set_default("instance_type", "gpu-a3-highgpu-8g-256")
+            fv.set_default("num_replicas", num_replicas)
             fv.mark_as_parsed()
             cfg: jobset_utils.A3ReplicatedJob.Config = jobset_utils.A3ReplicatedJob.from_flags(fv)
             cfg.project = jobset_utils.gcp_settings("project", required=True, fv=fv)
-            cfg.service_account = jobset_utils.gcp_settings(
-                "k8s_service_account", required=True, fv=fv
-            )
-            cfg.accelerator = AcceleratorConfig().set(
-                instance_type="gpu-a3-highgpu-8g-256",
-                num_replicas=num_replicas,
-            )
             cfg.command = "test-command"
             cfg.env_vars = env_vars if env_vars is not None else {}
             bundler_cfg = bundler_cls.from_spec([], fv=fv).set(image="test-image")

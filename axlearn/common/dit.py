@@ -14,10 +14,10 @@ Ref: https://github.com/facebookresearch/DiT
 from typing import Optional, Union
 
 import chex
-import einops
 import jax
 import jax.numpy as jnp
 
+from axlearn.common import einops
 from axlearn.common.attention import MultiheadAttention, scaled_hidden_dim
 from axlearn.common.base_layer import BaseLayer
 from axlearn.common.config import (
@@ -475,9 +475,7 @@ class DiTAttentionLayer(BaseLayer):
             init_states: A Nested Tensor state depending on the `attention` layer implementation.
         """
         states = dict()
-        states["attention"], _ = self.attention.init_states(
-            time_step=None, query=input_spec, attention_logit_biases=None
-        )
+        states["attention"], _ = self.attention.init_states(time_step=None, query=input_spec)
         return states
 
     def extend_step(
@@ -524,11 +522,9 @@ class DiTAttentionLayer(BaseLayer):
             x = modulate(x=x, shift=shift, scale=scale)
 
         # It supports only the (sliding window) causal case, which is handled by attention itself.
-        attention_logit_biases = None
         attn_states, attn_output = self.attention.extend_step(
             cached_states=cached_states["attention"],
             query=x,
-            attention_logit_biases=attention_logit_biases,
         )
         x = attn_output.data
 
