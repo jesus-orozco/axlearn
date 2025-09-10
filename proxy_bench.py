@@ -1,3 +1,4 @@
+import os
 import time
 import jax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -72,5 +73,9 @@ def benchmark_host_to_device_throughput():
 
 
 if __name__ == "__main__":
-  pathwaysutils.initialize()
+  pw = os.environ.get("PATHWAYS")
+  if pw == 1:
+    pathwaysutils.initialize()
+  else:
+    jax.initialize()
   benchmark_host_to_device_throughput()
