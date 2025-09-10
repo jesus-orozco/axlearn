@@ -159,7 +159,7 @@ def get_trainer_kwargs(
     elif model_size == "Switch-Base":
         # Num of parameters: 30B.
         import jax
-        gbs=len(jax.devices())
+        gbs=len(jax.devices()) * 4
         trainer_kwargs = dict(
             model_kwargs=dict(
                 num_layers=12,
@@ -237,7 +237,7 @@ def get_trainer_kwargs(
     elif model_size == "Switch-Large":
         # Num of parameters: 104B.
         import jax
-        gbs=len(jax.devices())
+        gbs=len(jax.devices()) * 4
         trainer_kwargs = dict(
             model_kwargs=dict(
                 num_layers=24,
@@ -346,6 +346,7 @@ def get_trainer_kwargs(
                 ),
             ),
         )
+        print(trainer_kwargs)
     elif model_size == "Switch-XXL":
         # Num of parameters: 520B.
         trainer_kwargs = dict(
