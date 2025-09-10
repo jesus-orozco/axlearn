@@ -10,7 +10,7 @@ def benchmark_host_to_device_throughput():
   """Benchmarks JAX device_put throughput from CPU host to a v5e-32 TPU slice.
   """
   print(f"JAX version: {jax.__version__}")
-  devices = jax.devices()
+  devices = jax.devices() if os.environ.get("JAX_PLATFORMS") else jax.local_devices()
   num_devices = len(devices)
   print(f"Available devices: {num_devices}")
 
@@ -48,6 +48,8 @@ def benchmark_host_to_device_throughput():
 
   print(f"Starting benchmark ({num_transfers} transfers)...")
   for i in range(num_transfers):
+    if i == 0:
+      jax.profiler.start_trace("gs://cloud-tpu-multipod-dev-axlearn/traces/proxy-benchmark")
     start_time = time.perf_counter()
     device_array = jax.device_put(host_array, replicated_sharding)
     device_array.block_until_ready()
@@ -56,6 +58,8 @@ def benchmark_host_to_device_throughput():
     duration = end_time - start_time
     transfer_times.append(duration)
     print(f"Transfer {i+1}/{num_transfers}: {duration:.4f} seconds")
+    if i == 0:
+      jax.profiler.stop_trace()
     del device_array  # Optional: hint for early deletion
 
   avg_time = np.mean(transfer_times)
@@ -70,12 +74,9 @@ def benchmark_host_to_device_throughput():
       f" {total_data_moved_gb:.2f} GiB"
   )
   print(f"Aggregated Host -> Devices Throughput: {throughput_gb_s:.2f} GiB/s")
+  print(f"Aggregated Host -> Devices Throughput: {throughput_gb_s * 8:.2f} Gbps/s")
 
 
 if __name__ == "__main__":
-  pw = os.environ.get("PATHWAYS")
-  if pw == 1:
-    pathwaysutils.initialize()
-  else:
-    jax.initialize()
+  pathwaysutils.initialize() if os.environ.get("JAX_PLATFORMS") =="proxy" else jax.distributed.initialize()
   benchmark_host_to_device_throughput()

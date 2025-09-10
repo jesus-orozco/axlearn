@@ -28,4 +28,4 @@ axlearn gcp launch run --cluster=$GKE_CLUSTER \
       --bundler_spec=allow_dirty=True \
       --bundler_type=artifactregistry --bundler_spec=image=tpu \
       --bundler_spec=dockerfile=Dockerfile --bundler_spec=target=tpu \
-      -- "export PATHWAYS=1; python3 proxy_bench.py"
+      -- sleep infinity;
