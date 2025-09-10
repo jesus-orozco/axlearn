@@ -10,7 +10,7 @@ def benchmark_host_to_device_throughput():
   """Benchmarks JAX device_put throughput from CPU host to a v5e-32 TPU slice.
   """
   print(f"JAX version: {jax.__version__}")
-  devices = jax.devices() if os.environ.get("JAX_PLATFORMS") else jax.local_devices()
+  devices = jax.devices() if os.environ.get("JAX_PLATFORMS") == "proxy" else jax.local_devices()
   num_devices = len(devices)
   print(f"Available devices: {num_devices}")
 
